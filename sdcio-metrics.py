@@ -1,17 +1,21 @@
 import time
-from prometheus_client import start_http_server, Gauge
-from kubernetes import client, config, watch
+from prometheus_client import start_http_server, Gauge, REGISTRY, PROCESS_COLLECTOR, GC_COLLECTOR, PLATFORM_COLLECTOR
+from kubernetes import client, config
+
+# 1. Remove default Python/Process metrics to keep it clean
+REGISTRY.unregister(PROCESS_COLLECTOR)
+REGISTRY.unregister(GC_COLLECTOR)
+REGISTRY.unregister(PLATFORM_COLLECTOR)
 
 # Define Prometheus metrics
-# We use labels so you can filter by target or type in Grafana
-DEVIATION_STATUS = Gauge(
-    'sdcio_deviation_info', 
-    'Current deviation status per target', 
+# Value will now be the actual count of deviation entries
+DEVIATION_COUNT = Gauge(
+    'sdcio_deviation_count', 
+    'Number of deviations found in the spec per target', 
     ['target_name', 'namespace', 'deviation_type']
 )
 
 def monitor_deviations():
-    # Load config from the Pod's ServiceAccount
     try:
         config.load_incluster_config()
     except config.ConfigException:
@@ -20,11 +24,11 @@ def monitor_deviations():
     custom_api = client.CustomObjectsApi()
     
     print("Starting sdcio-metrics exporter on port 8080...")
+    # metrics_url: http://localhost:8080/metrics
     start_http_server(8080)
 
     while True:
         try:
-            # List current deviations in the namespace
             resource = custom_api.list_namespaced_custom_object(
                 group="config.sdcio.dev",
                 version="v1alpha1",
@@ -32,28 +36,30 @@ def monitor_deviations():
                 plural="deviations"
             )
             
-            # Clear old metrics to handle deleted deviations
-            DEVIATION_STATUS.clear()
+            # Clear old metrics to handle deleted or renamed deviations correctly
+            DEVIATION_COUNT.clear()
 
             for item in resource.get('items', []):
                 metadata = item.get('metadata', {})
                 spec = item.get('spec', {})
                 
-                # Extract labels based on your JSON structure
-                target = metadata.get('labels', {}).get('config.sdcio.dev/targetName', 'unknown')
+                # Extract labels
+                target = metadata.get('labels', {}).get('config.sdcio.dev/targetName', metadata.get('name'))
                 d_type = spec.get('deviationType', 'unknown')
                 namespace = metadata.get('namespace', 'nok-bng')
                 
-                # Setting value to 1 (active). 
-                # If your CRD eventually has a "count" field in status, 
-                # you can use item.get('status', {}).get('count', 1)
-                DEVIATION_STATUS.labels(
+                # 2. Extract the count from spec.deviations list
+                # Defaults to 0 if the deviations key is missing or empty
+                deviations_list = spec.get('deviations', [])
+                count = len(deviations_list)
+                
+                DEVIATION_COUNT.labels(
                     target_name=target, 
                     namespace=namespace, 
                     deviation_type=d_type
-                ).set(1)
+                ).set(count)
 
-            time.sleep(30) # Poll every 30 seconds
+            time.sleep(30)
             
         except Exception as e:
             print(f"Error fetching deviations: {e}")
