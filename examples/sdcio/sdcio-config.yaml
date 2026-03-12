@@ -1,0 +1,16 @@
+apiVersion: metrics.dynamic.io/v1alpha1
+kind: MetricDefinition
+metadata:
+  name: config-status
+  namespace: your-namespace
+spec:
+  metricName: "sdcio_config_ready"
+  help: "Config Ready status (1 for True, 0 for False)"
+  resource:
+    group: "config.sdcio.dev"
+    version: "v1alpha1"
+    plural: "configs"
+  labelMappings:
+    - label: "target_name"
+      path: "metadata.labels['config.sdcio.dev/targetName']"
+  valuePath: "status.conditions[?(@.type=='Ready')].status"

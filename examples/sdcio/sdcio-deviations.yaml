@@ -1,0 +1,16 @@
+apiVersion: metrics.dynamic.io/v1alpha1
+kind: MetricDefinition
+metadata:
+  name: sdcio-deviations
+  namespace: my-namespace
+spec:
+  metricName: "cr_deviation_count"
+  help: "Count of deviations in sdcio objects"
+  resource:
+    group: "config.sdcio.dev"
+    version: "v1alpha1"
+    plural: "deviations"
+  labelMappings:
+    - label: "type"
+      path: "spec.deviationType"
+  valuePath: "spec.deviations.length"

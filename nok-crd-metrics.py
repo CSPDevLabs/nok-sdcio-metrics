@@ -1,108 +1,134 @@
+import os
 import time
-from prometheus_client import start_http_server, Gauge, REGISTRY, PROCESS_COLLECTOR, GC_COLLECTOR, PLATFORM_COLLECTOR
-from kubernetes import client, config
+import logging
+from threading import Thread
+from jsonpath_ng import parse
+from prometheus_client import start_http_server, Gauge, REGISTRY
+from kubernetes import client, config, watch
 
-# 1. Clean up default metrics
-REGISTRY.unregister(PROCESS_COLLECTOR)
-REGISTRY.unregister(GC_COLLECTOR)
-REGISTRY.unregister(PLATFORM_COLLECTOR)
+# Generic Logger
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logger = logging.getLogger("nok-crd-metrics")
 
-# Metrics Definitions
-DEVIATION_COUNT = Gauge(
-    'sdcio_deviation_count', 
-    'Number of deviations found in the spec per target', 
-    ['target_name', 'namespace', 'name', 'deviation_type']
-)
-
-TARGET_CONFIG_READY = Gauge(
-    'sdcio_target_config_ready',
-    'Target ConfigReady status (1 for True, 0 for False)',
-    ['name', 'namespace', 'address', 'vendor']
-)
-
-# New Metric for Config status
-CONFIG_READY = Gauge(
-    'sdcio_config_ready',
-    'Config Ready status (1 for True, 0 for False)',
-    ['name', 'namespace', 'target_name']
-)
-
-def monitor_resources():
-    try:
-        config.load_incluster_config()
-    except config.ConfigException:
-        config.load_kube_config()
-
-    custom_api = client.CustomObjectsApi()
-    print("Starting sdcio-metrics exporter on port 8080...")
-    start_http_server(8080)
-
-    while True:
+class GenericCrdExporter:
+    def __init__(self):
+        # Auto-detect namespace or fallback to default
         try:
-            # --- 1. PROCESS DEVIATIONS (config.sdcio.dev) ---
-            deviations = custom_api.list_namespaced_custom_object(
-                group="config.sdcio.dev", version="v1alpha1",
-                namespace="nok-bng", plural="deviations"
-            )
-            DEVIATION_COUNT.clear()
-            for item in deviations.get('items', []):
-                meta = item.get('metadata', {})
-                spec = item.get('spec', {})
-                target = meta.get('labels', {}).get('config.sdcio.dev/targetName', meta.get('name'))
-                DEVIATION_COUNT.labels(
-                    target_name=target, 
-                    namespace=meta.get('namespace', 'nok-bng'), 
-                    name=meta.get('name', 'unknown'), 
-                    deviation_type=spec.get('deviationType', 'unknown')
-                ).set(len(spec.get('deviations', [])))
+            with open("/var/run/secrets/kubernetes.io/serviceaccount/namespace", "r") as f:
+                self.namespace = f.read().strip()
+        except:
+            self.namespace = os.getenv("NAMESPACE", "default")
 
-            # --- 2. PROCESS TARGETS (inv.sdcio.dev) ---
-            targets = custom_api.list_namespaced_custom_object(
-                group="inv.sdcio.dev", version="v1alpha1",
-                namespace="nok-bng", plural="targets"
-            )
-            TARGET_CONFIG_READY.clear()
-            for item in targets.get('items', []):
-                meta = item.get('metadata', {})
-                spec = item.get('spec', {})
-                status = item.get('status', {})
-                is_ready = 1 if any(c.get('type') == 'ConfigReady' and c.get('status') == 'True' for c in status.get('conditions', [])) else 0
-                TARGET_CONFIG_READY.labels(
-                    name=meta.get('name', 'unknown'), 
-                    namespace=meta.get('namespace', 'nok-bng'), 
-                    address=spec.get('address', 'unknown'), 
-                    vendor=meta.get('labels', {}).get('vendor', 'unknown')
-                ).set(is_ready)
+        self.metrics = {}      # {metric_name: Gauge_Object}
+        self.definitions = {}  # {metric_name: CRD_Spec}
+        
+        try:
+            config.load_incluster_config()
+        except:
+            config.load_kube_config()
+        
+        self.custom_api = client.CustomObjectsApi()
 
-            # --- 3. PROCESS CONFIGS (config.sdcio.dev) ---
-            configs = custom_api.list_namespaced_custom_object(
-                group="config.sdcio.dev", version="v1alpha1",
-                namespace="nok-bng", plural="configs"
-            )
-            CONFIG_READY.clear()
-            for item in configs.get('items', []):
-                meta = item.get('metadata', {})
-                status = item.get('status', {})
-                
-                # Labels
-                c_name = meta.get('name', 'unknown')
-                c_namespace = meta.get('namespace', 'nok-bng')
-                c_target = meta.get('labels', {}).get('config.sdcio.dev/targetName', 'unknown')
+    def resolve_path(self, item, path):
+        """Extracts values from K8s objects using JSONPath."""
+        try:
+            # Handle special boolean logic for 'Ready' conditions
+            if "status.conditions" in path and "Ready" in path:
+                conds = item.get('status', {}).get('conditions', [])
+                return 1 if any(c.get('type') == 'Ready' and c.get('status') == 'True' for c in conds) else 0
+            
+            # Standard JSONPath
+            jsonpath_expr = parse(path)
+            matches = [match.value for match in jsonpath_expr.find(item)]
+            if not matches: return 0 if "value" in path else "unknown"
+            
+            # Return length if path ends in .length, else first match
+            return len(matches[0]) if path.endswith('.length') else matches[0]
+        except Exception:
+            return "unknown"
 
-                # Check Ready condition
-                c_is_ready = 1 if any(c.get('type') == 'Ready' and c.get('status') == 'True' for c in status.get('conditions', [])) else 0
-                
-                CONFIG_READY.labels(
-                    name=c_name, 
-                    namespace=c_namespace, 
-                    target_name=c_target
-                ).set(c_is_ready)
+    def watch_definitions(self):
+        """Watcher thread: Reconciles MetricDefinition CRDs in the local namespace."""
+        logger.info(f"Watching MetricDefinitions in namespace: {self.namespace}")
+        w = watch.Watch()
+        while True:
+            try:
+                for event in w.stream(
+                    self.custom_api.list_namespaced_custom_object,
+                    group="metrics.dynamic.io", version="v1alpha1",
+                    namespace=self.namespace, plural="metricdefinitions"
+                ):
+                    spec = event['object']['spec']
+                    m_name = spec['metricName']
+                    
+                    if event['type'] in ['ADDED', 'MODIFIED']:
+                        # Extract label keys + standard ones
+                        label_keys = [lm['label'] for lm in spec['labelMappings']]
+                        label_keys.extend(['resource_name', 'resource_namespace'])
+                        
+                        if m_name not in self.metrics:
+                            self.metrics[m_name] = Gauge(m_name, spec.get('help', ''), label_keys)
+                        
+                        self.definitions[m_name] = spec
+                        logger.info(f"Reconciled metric: {m_name}")
+
+                    elif event['type'] == 'DELETED':
+                        self.definitions.pop(m_name, None)
+                        logger.info(f"Deleted metric definition: {m_name}")
+
+            except client.exceptions.ApiException as e:
+                if e.status == 403:
+                    logger.error("RBAC ERROR: App lacks permission to list MetricDefinitions.")
+                else:
+                    logger.error(f"API Error in Watcher: {e}")
+                time.sleep(10)
+
+    def scrape_loop(self):
+        """Main loop: Scrapes the resources defined by the CRDs."""
+        start_http_server(8080)
+        logger.info("Metrics server listening on port 8080")
+
+        while True:
+            # Iterate over a copy to avoid dictionary size changes during loop
+            active_defs = list(self.definitions.items())
+            
+            for m_name, spec in active_defs:
+                try:
+                    res = spec['resource']
+                    # Scrape resources (limited to the app's namespace for security)
+                    items = self.custom_api.list_namespaced_custom_object(
+                        group=res['group'], version=res['version'],
+                        namespace=self.namespace, plural=res['plural']
+                    )
+
+                    gauge = self.metrics[m_name]
+                    for item in items.get('items', []):
+                        # Map labels dynamically
+                        labels = {lm['label']: str(self.resolve_path(item, lm['path'])) 
+                                 for lm in spec['labelMappings']}
+                        labels['resource_name'] = item['metadata']['name']
+                        labels['resource_namespace'] = item['metadata']['namespace']
+                        
+                        # Set value
+                        val = self.resolve_path(item, spec['valuePath'])
+                        try:
+                            gauge.labels(**labels).set(float(val))
+                        except (ValueError, TypeError):
+                            gauge.labels(**labels).set(0)
+
+                except client.exceptions.ApiException as e:
+                    if e.status == 403:
+                        logger.error(f"RBAC ERROR: Cannot list {res['plural']}. Check Role permissions.")
+                    else:
+                        logger.error(f"Error scraping {m_name}: {e}")
+                except Exception as e:
+                    logger.error(f"Unexpected error scraping {m_name}: {e}")
 
             time.sleep(30)
-            
-        except Exception as e:
-            print(f"Error fetching resources: {e}")
-            time.sleep(10)
 
 if __name__ == '__main__':
-    monitor_resources()
+    app = GenericCrdExporter()
+    # Start Watcher in background
+    Thread(target=app.watch_definitions, daemon=True).start()
+    # Run Scraper
+    app.scrape_loop()

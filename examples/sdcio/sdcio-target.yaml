@@ -1,0 +1,18 @@
+apiVersion: metrics.dynamic.io/v1alpha1
+kind: MetricDefinition
+metadata:
+  name: target-status
+  namespace: your-namespace
+spec:
+  metricName: "sdcio_target_config_ready"
+  help: "Target ConfigReady status (1 for True, 0 for False)"
+  resource:
+    group: "inv.sdcio.dev"
+    version: "v1alpha1"
+    plural: "targets"
+  labelMappings:
+    - label: "address"
+      path: "spec.address"
+    - label: "vendor"
+      path: "metadata.labels.vendor"
+  valuePath: "status.conditions[?(@.type=='ConfigReady')].status" 
