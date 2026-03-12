@@ -34,44 +34,48 @@ class GenericCrdExporter:
     def resolve_path(self, item, path):
         """Extracts values using JSONPath with support for filters and length."""
         try:
-            # 1. Handle manual .length suffix
             is_length_query = False
             search_path = path
             if path.endswith('.length'):
                 is_length_query = True
                 search_path = path[:-7]
 
-            # 2. Execute JSONPath (handles filters like [?(@.type=='Ready')])
             jsonpath_expr = parse(search_path)
             matches = [match.value for match in jsonpath_expr.find(item)]
             
             if not matches:
                 return 0 if is_length_query else "unknown"
 
-            # If it's a length query, return the count of matches
+            # If it's a length query, return the count
             if is_length_query:
-                # If the match itself is a list (like spec.deviations), count its items
-                # otherwise count the number of matches found by JSONPath
-                first_match = matches[0]
-                return len(first_match) if isinstance(first_match, list) else len(matches)
+                # If the match itself is a list (like spec.deviations), return its length
+                return len(matches[0]) if isinstance(matches[0], list) else len(matches)
 
-            # 3. Value Normalization (Take the first match)
+            # --- FIX STARTS HERE ---
+            # Take the FIRST match from the list returned by JSONPath
             val = matches[0]
 
-            # Convert Booleans or specific Strings to 1/0
+            # Convert Booleans
             if isinstance(val, bool):
                 return 1 if val else 0
             
-            val_str = str(val).lower()
+            # Convert Strings (True, Ready, Reachable, etc)
+            val_str = str(val).strip().lower()
             if val_str in ['true', 'reachable', 'enabled', 'ready']:
                 return 1
             if val_str in ['false', 'unreachable', 'disabled', 'notready']:
                 return 0
+            # --- FIX ENDS HERE ---
 
-            return val
+            # Try to return as float, otherwise 0
+            try:
+                return float(val)
+            except:
+                return 0
         except Exception as e:
             logger.error(f"Path error {path}: {e}")
             return 0
+
 
     def watch_definitions(self):
         """Watcher thread: Reconciles MetricDefinition CRDs."""
