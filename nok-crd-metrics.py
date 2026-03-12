@@ -10,6 +10,9 @@ from kubernetes import client, config, watch
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("nok-crd-metrics")
 
+# Add an environment variable to filter CRDs
+self.app_filter = os.getenv("METRIC_APP_LABEL", "")
+
 class GenericCrdExporter:
     def __init__(self):
         # 1. Create a CLEAN registry (removes default CPU/Mem/Python metrics)
@@ -90,7 +93,8 @@ class GenericCrdExporter:
                 for event in w.stream(
                     self.custom_api.list_namespaced_custom_object,
                     group="metrics.dynamic.io", version="v1alpha1",
-                    namespace=self.namespace, plural="metricdefinitions"
+                    namespace=self.namespace, plural="metricdefinitions",
+                    label_selector=f"metrics-app={self.app_filter}" if self.app_filter else None
                 ):
                     spec = event['object']['spec']
                     m_name = spec['metricName']
