@@ -33,53 +33,53 @@ class GenericCrdExporter:
 
     def resolve_path(self, item, path):
         """Extracts values using JSONPath with support for filters and length."""
+        res_name = item.get('metadata', {}).get('name', 'unknown')
         try:
-            # 1. Handle .length suffix
             is_length_query = False
             search_path = path
             if path.endswith('.length'):
                 is_length_query = True
                 search_path = path[:-7]
 
-            # 2. Parse and Find
             jsonpath_expr = parse(search_path)
             matches = [match.value for match in jsonpath_expr.find(item)]
             
+            # --- DEBUG LOG 1: What did JSONPath find? ---
+            # logger.info(f"[DEBUG] Resource: {res_name} | Path: {path} | Matches: {matches}")
+
             if not matches:
                 return 0 if is_length_query else "unknown"
 
-            # 3. Handle Length Queries
             if is_length_query:
-                # If the first match is a list (like spec.deviations), return its length
-                if isinstance(matches[0], list):
-                    return len(matches[0])
-                # Otherwise return how many matches the JSONPath found
-                return len(matches)
+                # If match[0] is a list, count its items, else count the matches found
+                val = len(matches[0]) if isinstance(matches[0], list) else len(matches)
+                return val
 
-            # --- FIX: Extract the actual value from the match list ---
-            # JSONPath filters ALWAYS return a list of matches. 
-            # We want the first one.
+            # Unpack the first match
             val = matches[0] 
+            
+            # --- DEBUG LOG 2: After unpacking ---
+            logger.info(f"[DEBUG] Resource: {res_name} | Path: {path} | Raw Value: {val} | Type: {type(val)}")
 
-            # 4. Normalization to 1/0
+            # Handle Booleans (K8s sometimes returns actual bools, not strings)
             if isinstance(val, bool):
                 return 1 if val else 0
             
+            # Handle Strings
             val_str = str(val).strip().lower()
-            # This handles 'True', 'Ready', 'Reachable', etc.
             if val_str in ['true', 'reachable', 'enabled', 'ready', 'ok']:
                 return 1
             if val_str in ['false', 'unreachable', 'disabled', 'notready', 'failed']:
                 return 0
 
-            # 5. Numeric fallback
+            # Numeric fallback
             try:
                 return float(val)
             except (ValueError, TypeError):
                 return 0
                 
         except Exception as e:
-            logger.error(f"Path error {path}: {e}")
+            logger.error(f"Path error {path} on {res_name}: {e}")
             return 0
 
 
