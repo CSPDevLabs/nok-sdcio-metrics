@@ -84,26 +84,26 @@ class GenericCrdExporter:
             return "error" if is_label else 0.0
 
     def wait_for_rbac(self):
-        logger.info("Waiting for RBAC permissions...")
+        logger.info("Waiting for basic RBAC connectivity...")
         while True:
             try:
+                # Just a simple check to see if the service account can talk to the API
                 self.custom_api.list_namespaced_custom_object(
-                    group="nok.dev",
+                    group="metrics.dynamic.io", 
                     version="v1alpha1",
                     namespace=self.namespace,
-                    plural="networkdevicetargets",
+                    plural="metricdefinitions",
                     limit=1
                 )
-                logger.info("RBAC permissions confirmed")
+                logger.info("Basic RBAC permissions confirmed")
                 return
-            except client.exceptions.ApiException as e:
+            except ApiException as e:
                 if e.status == 403:
-                    logger.warning(f"RBAC denied for {m_name}. Removing from cache to trigger re-sync.")
-                    self.definitions.pop(m_name, None) # Drop it so we stop looping on it
+                    logger.warning("ServiceAccount cannot list MetricDefinitions yet. Retrying...")
                     time.sleep(5)
-                    continue
                 else:
                     raise
+
 
 
     def watch_definitions(self):
