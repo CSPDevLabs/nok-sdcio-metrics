@@ -173,17 +173,38 @@ class GenericCrdExporter:
 
                 except ApiException as e:
                     if e.status == 403:
-                        logger.warning(f"RBAC denied for {m_name}. Removing from cache to trigger re-sync.")
-                        self.definitions.pop(m_name, None) # Drop it so we stop looping on it
+                        logger.warning(
+                            f"RBAC denied for {m_name}. Will retry; assuming propagation delay."
+                        )
                         time.sleep(5)
-                        continue
+                        continue                    
                     else:
                         logger.error(f"Scrape Error [{m_name}]: {e}")
             
             time.sleep(30)
 
+    def wait_for_resources(self):
+        logger.info("Waiting for resource RBAC...")
+        while True:
+            try:
+                self.custom_api.list_namespaced_custom_object(
+                    group="nok.dev",
+                    version="v1alpha1",
+                    namespace=self.namespace,
+                    plural="networkdevicetargets",
+                    limit=1
+                )
+                logger.info("Resource RBAC confirmed")
+                return
+            except ApiException as e:
+                if e.status == 403:
+                    time.sleep(5)
+                else:
+                    raise
+
 if __name__ == '__main__':
     app = GenericCrdExporter()
     app.wait_for_rbac()
+    app.wait_for_resources()
     Thread(target=app.watch_definitions, daemon=True).start()
     app.scrape_loop()
