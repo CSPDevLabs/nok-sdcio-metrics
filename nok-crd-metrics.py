@@ -6,7 +6,11 @@ from jsonpath_ng.ext import parse
 from prometheus_client import start_http_server, Gauge, CollectorRegistry
 from kubernetes import client, config, watch
 from kubernetes.client.exceptions import ApiException
-from http.server import BaseHTTPRequestHandler, HTTPServer # Import for health endpoint
+from http.server import BaseHTTPRequestHandler, HTTPServer 
+# Import for advanced client configuration
+from kubernetes.client import Configuration
+from kubernetes.client.api_client import ApiClient
+import urllib3 # To manage connection pools
 
 # Generic Logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
