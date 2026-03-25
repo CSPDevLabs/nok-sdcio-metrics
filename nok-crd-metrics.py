@@ -54,13 +54,28 @@ class GenericCrdExporter:
 
         self.metrics = {}
         self.definitions = {}
+        self.custom_api = None # Initialize to None, will be set by _init_kube_client
+        self._init_kube_client() # Initial client setup        
 
+    def _init_kube_client(self):
+        """Initializes or re-initializes the Kubernetes client."""
+        logger.info("Initializing Kubernetes client...")
         try:
+            # Clear any existing client configuration to force a fresh load
             config.load_incluster_config()
-        except:
+            logger.info("Loaded in-cluster Kubernetes config.")
+        except config.ConfigException:
+            logger.warning("Could not load in-cluster config, trying kubeconfig.")
             config.load_kube_config()
+            logger.info("Loaded kubeconfig.")
+        except Exception as e:
+            logger.error(f"Failed to load Kubernetes config: {e}")
+            raise # Re-raise to prevent app from starting without client
 
+        # Create a new CustomObjectsApi instance
         self.custom_api = client.CustomObjectsApi()
+        logger.info("Kubernetes CustomObjectsApi client re-initialized.")
+
 
     def resolve_path(self, item, path, is_label=False):
         """Extracts values. Labels stay strings, values become 1/0/float."""
